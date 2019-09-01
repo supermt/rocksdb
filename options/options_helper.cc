@@ -139,6 +139,9 @@ DBOptions BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.avoid_unnecessary_blocking_io =
       immutable_db_options.avoid_unnecessary_blocking_io;
   options.log_readahead_size = immutable_db_options.log_readahead_size;
+  // modified by Jinghuan
+//  options.storage_layouts = immutable_db_options.storage_layouts;
+  options.storage_layouts = 5; // which is 0 1 0 1 for the sequence "PM,NVMeSSD,SSD,HDD"
   return options;
 }
 

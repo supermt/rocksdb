@@ -83,6 +83,9 @@ struct ImmutableDBOptions {
   bool avoid_unnecessary_blocking_io;
   bool persist_stats_to_disk;
   size_t log_readahead_size;
+  // modified by Jinghuan
+  int storage_layouts;
+
 };
 
 struct MutableDBOptions {
