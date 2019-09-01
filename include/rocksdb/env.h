@@ -26,6 +26,8 @@
 #include "rocksdb/status.h"
 #include "rocksdb/thread_status.h"
 #include <map>
+#include <iostream>
+#include <unistd.h>
 
 #ifdef _WIN32
 // Windows API macro interference
@@ -173,7 +175,17 @@ namespace rocksdb {
 
     static int storage_layouts;
 
-    static std::map<std::string,std::string> connect_points;
+    static std::map<std::string, std::string> connect_points;
+
+    static std::string GetLinkDirectory(int level);
+
+    static int pm_layout;
+
+    static int nvmessd_layout;
+
+    static int satassd_layout;
+
+    static int satahdd_layout;
 
     static int GetStorageLayouts();
 

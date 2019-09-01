@@ -27,8 +27,25 @@ namespace rocksdb {
   // initialize the storage layouts and possible link points
   int Env::storage_layouts = 1;
 
+  int Env::pm_layout = 2; // 0 and 1
+
+  int Env::nvmessd_layout = 4; // 2,3
+
+  int Env::satassd_layout = 6; // 4,5
+
+  int Env::satahdd_layout = 8; // 6,7
+
   std::map<std::string, std::string> Env::connect_points
       = std::map<std::string, std::string>();
+
+  std::string Env::GetLinkDirectory(int level) {
+    if (level < 1) {
+      return connect_points["nvme_ssd_dir"];
+    } else {
+      return connect_points["sata_hdd_dir"];
+    }
+
+  }
 
   int Env::GetStorageLayouts() { return Env::storage_layouts; }
 

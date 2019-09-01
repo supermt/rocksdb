@@ -19,8 +19,6 @@
 #include "table/block_based/block_based_table_factory.h"
 #include "test_util/sync_point.h"
 #include "util/rate_limiter.h"
-#include <unistd.h>
-#include <iostream>
 
 
 namespace rocksdb {
@@ -1309,34 +1307,7 @@ namespace rocksdb {
     int layouts = db_options.storage_layouts;
 
     if (layouts > 1) {
-      // more than one storage material, make sure the environment configuration
-      // has followed the manner.
-      if (impl->env_->GetStorageLayouts() != layouts) {
-        impl->env_->SetStorageLayouts(layouts);
-      }
-
-      std::cout << "Creating the temp directories" << layouts << std::endl;
-      // validate the link points, create if not exists
-      s = impl->env_->ValidateLinkPoints(db_options);
-
-      if (!s.ok()) {
-        delete impl;
-        return s;
-      }
-      std::string abs = "";
-      impl->env_->GetAbsolutePath(dbname, &abs);
-
-      for (const auto &entry : impl->env_->connect_points) {
-        // here needs more optimization, but not now
-        if (entry.second != "") {
-          // Create
-          std::string current = abs + "/" + entry.first;
-          std::cout << "Creating Directory :" << current << std::endl;
-          impl->env_->CreateDirIfMissing(current);
-          // Link
-          // Next
-        }
-      }
+      prepare_for_hybrid_storage(impl, layouts, db_options, dbname);
     }
 
     s = impl->env_->CreateDirIfMissing(impl->immutable_db_options_.wal_dir);
@@ -1558,4 +1529,60 @@ namespace rocksdb {
     }
     return s;
   }
+
+
+  Status DBImpl::prepare_for_hybrid_storage(DBImpl *impl, int layouts,
+                                            const DBOptions &db_options, std::string dbname) {
+    // more than one storage material, make sure the environment configuration
+    // has followed the manner.
+    Status s = Status::OK();
+    if (impl->env_->GetStorageLayouts() != layouts) {
+      impl->env_->SetStorageLayouts(layouts);
+    }
+
+    std::cout << "Creating the temp directories" << layouts << std::endl;
+    // validate the link points, create if not exists
+    s = impl->env_->ValidateLinkPoints(db_options);
+
+    if (!s.ok()) {
+      delete impl;
+      return s;
+    }
+    std::string abs = "";
+    impl->env_->GetAbsolutePath(dbname, &abs);
+
+    for (const auto &entry : impl->env_->connect_points) {
+      // here needs more optimization, but not now
+      if (entry.second != "") {
+        // Create
+        std::string short_cut = abs + "/" + entry.first;
+        // link to a file that already exists will cause segmentation fault.
+        //        std::cout << "Creating Directory :" << short_cut << std::endl;
+//        impl->env_->CreateDirIfMissing(short_cut);
+
+        if (impl->env_->FileExists(short_cut).ok()) {
+          // the link exists
+          // delete the link or skip from it.
+          std::cout << "Link Skipped " << std::endl;
+          return s;
+        }
+
+        // Link if not exists
+        std::string real_dir = entry.second;
+//        std::cout << "Creating symlink from: " << real_dir << " to :" << short_cut << std::endl;
+        int link_result = symlink(real_dir.data(), short_cut.data());
+        // capture the err, perhaps change to errno, but not now
+        if (link_result != 0) {
+          s = Status::Aborted("Link Failed");
+          delete impl;
+          return s;
+        }
+        std::cout << "Link Finished, from :" << real_dir << " to:" << short_cut << std::endl;
+      }
+    }
+    // return successful by default
+    return s;
+  }
+
+
 }  // namespace rocksdb

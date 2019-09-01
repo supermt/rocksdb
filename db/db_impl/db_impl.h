@@ -2129,6 +2129,9 @@ namespace rocksdb {
     InstrumentedCondVar atomic_flush_install_cv_;
 
     bool wal_in_db_path_;
+
+    static Status prepare_for_hybrid_storage(DBImpl *impl,
+        int layouts, const DBOptions &db_options, std::string dbname);
   };
 
   extern Options SanitizeOptions(const std::string &db, const Options &src);

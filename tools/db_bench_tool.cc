@@ -200,7 +200,7 @@ DEFINE_string(
     "doing a GetMergeOperands and binary searching in the operands which are"
     "sorted sub-lists. The MergeOperator used is sortlist.h\n");
 
-DEFINE_int64(num, 1000000, "Number of key/values to place in database");
+DEFINE_int64(num, 10000000, "Number of key/values to place in database");
 
 DEFINE_int64(numdistinct, 1000,
              "Number of distinct keys to use. Used in RandomWithVerify to "
