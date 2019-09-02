@@ -1,127 +1,895 @@
-cmake_minimum_required(VERSION 3.14)
-project(rocksdb)
+# Prerequisites for Windows:
+#     This cmake build is for Windows 64-bit only.
+#
+# Prerequisites:
+#     You must have at least Visual Studio 2015 Update 3. Start the Developer Command Prompt window that is a part of Visual Studio installation.
+#     Run the build commands from within the Developer Command Prompt window to have paths to the compiler and runtime libraries set.
+#     You must have git.exe in your %PATH% environment variable.
+#
+# To build Rocksdb for Windows is as easy as 1-2-3-4-5:
+#
+# 1. Update paths to third-party libraries in thirdparty.inc file
+# 2. Create a new directory for build artifacts
+#        mkdir build
+#        cd build
+# 3. Run cmake to generate project files for Windows, add more options to enable required third-party libraries.
+#    See thirdparty.inc for more information.
+#        sample command: cmake -G "Visual Studio 15 Win64" -DWITH_GFLAGS=1 -DWITH_SNAPPY=1 -DWITH_JEMALLOC=1 -DWITH_JNI=1 ..
+# 4. Then build the project in debug mode (you may want to add /m[:<N>] flag to run msbuild in <N> parallel threads
+#                                          or simply /m to use all avail cores)
+#        msbuild rocksdb.sln
+#
+#        rocksdb.sln build features exclusions of test only code in Release. If you build ALL_BUILD then everything
+#        will be attempted but test only code does not build in Release mode.
+#
+# 5. And release mode (/m[:<N>] is also supported)
+#        msbuild rocksdb.sln /p:Configuration=Release
+#
+# Linux:
+#
+# 1. Install a recent toolchain such as devtoolset-3 if you're on a older distro. C++11 required.
+# 2. mkdir build; cd build
+# 3. cmake ..
+# 4. make -j
 
-set(CMAKE_CXX_STANDARD 14)
+cmake_minimum_required(VERSION 3.5.1)
 
-include_directories(cache)
-include_directories(db)
-include_directories(db/compaction)
-include_directories(db/db_impl)
-include_directories(env)
-include_directories(file)
-include_directories(hdfs)
-include_directories(include)
-include_directories(include/rocksdb)
-include_directories(include/rocksdb/utilities)
-include_directories(include/rocksdb/utilities/lua)
-include_directories(java/rocksjni)
-include_directories(logging)
-include_directories(memory)
-include_directories(memtable)
-include_directories(monitoring)
-include_directories(options)
-include_directories(port)
-include_directories(port/win)
-include_directories(table)
-include_directories(table/adaptive)
-include_directories(table/block_based)
-include_directories(table/cuckoo)
-include_directories(table/plain)
-include_directories(test_util)
-include_directories(third-party/folly/folly)
-include_directories(third-party/folly/folly/chrono)
-include_directories(third-party/folly/folly/container)
-include_directories(third-party/folly/folly/detail)
-include_directories(third-party/folly/folly/functional)
-include_directories(third-party/folly/folly/hash)
-include_directories(third-party/folly/folly/lang)
-include_directories(third-party/folly/folly/portability)
-include_directories(third-party/folly/folly/synchronization)
-include_directories(third-party/folly/folly/synchronization/detail)
-include_directories(third-party/gtest-1.7.0/fused-src/gtest)
-include_directories(tools)
-include_directories(tools/block_cache_analyzer)
-include_directories(tools/rdb)
-include_directories(trace_replay)
-include_directories(util)
-include_directories(utilities)
-include_directories(utilities/blob_db)
-include_directories(utilities/cassandra)
-include_directories(utilities/checkpoint)
-include_directories(utilities/compaction_filters)
-include_directories(utilities/merge_operators)
-include_directories(utilities/merge_operators/string_append)
-include_directories(utilities/persistent_cache)
-include_directories(utilities/simulator_cache)
-include_directories(utilities/table_properties_collectors)
-include_directories(utilities/trace)
-include_directories(utilities/transactions)
-include_directories(utilities/ttl)
-include_directories(utilities/write_batch_with_index)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/modules/")
+include(ReadVersion)
+get_rocksdb_version(rocksdb_VERSION)
+project(rocksdb
+  VERSION ${rocksdb_VERSION}
+  LANGUAGES CXX C ASM)
 
-add_executable(rocksdb
-        build/build_version.cc
-        cache/cache_bench.cc
-        cache/cache_test.cc
+if(POLICY CMP0042)
+  cmake_policy(SET CMP0042 NEW)
+endif()
+
+find_program(CCACHE_FOUND ccache)
+if(CCACHE_FOUND)
+  set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+  set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache)
+endif(CCACHE_FOUND)
+
+option(WITH_JEMALLOC "build with JeMalloc" OFF)
+option(WITH_SNAPPY "build with SNAPPY" ON) 
+option(WITH_LZ4 "build with lz4" ON)
+option(WITH_ZLIB "build with zlib" ON)
+option(WITH_ZSTD "build with zstd" ON)
+option(WITH_WINDOWS_UTF8_FILENAMES "use UTF8 as characterset for opening files, regardles of the system code page" ON)
+if (WITH_WINDOWS_UTF8_FILENAMES)
+  add_definitions(-DROCKSDB_WINDOWS_UTF8_FILENAMES)
+endif()
+# third-party/folly is only validated to work on Linux and Windows for now.
+# So only turn it on there by default.
+if(CMAKE_SYSTEM_NAME MATCHES "Linux" OR CMAKE_SYSTEM_NAME MATCHES "Windows")
+  option(WITH_FOLLY_DISTRIBUTED_MUTEX "build with folly::DistributedMutex" ON)
+else()
+  option(WITH_FOLLY_DISTRIBUTED_MUTEX "build with folly::DistributedMutex" OFF)
+endif()
+if(MSVC)
+  # Defaults currently different for GFLAGS.
+  #  We will address find_package work a little later
+  option(WITH_GFLAGS "build with GFlags" OFF)
+  option(WITH_XPRESS "build with windows built in compression" OFF)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/thirdparty.inc)
+else()
+  if(CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+    # FreeBSD has jemalloc as default malloc
+    # but it does not have all the jemalloc files in include/...
+    set(WITH_JEMALLOC ON)
+  else()
+    if(WITH_JEMALLOC)
+      find_package(JeMalloc REQUIRED)
+      add_definitions(-DROCKSDB_JEMALLOC -DJEMALLOC_NO_DEMANGLE)
+      list(APPEND THIRDPARTY_LIBS JeMalloc::JeMalloc)
+    endif()
+  endif()
+
+  # No config file for this
+  option(WITH_GFLAGS "build with GFlags" ON)
+  if(WITH_GFLAGS)
+    find_package(gflags)
+    if(gflags_FOUND)
+      add_definitions(-DGFLAGS=1)
+      include_directories(${gflags_INCLUDE_DIR})
+      list(APPEND THIRDPARTY_LIBS ${gflags_LIBRARIES})
+    endif()
+  endif()
+
+  if(WITH_SNAPPY)
+    find_package(snappy REQUIRED)
+    add_definitions(-DSNAPPY)
+    list(APPEND THIRDPARTY_LIBS snappy::snappy)
+  endif()
+
+  if(WITH_ZLIB)
+    find_package(ZLIB REQUIRED)
+    add_definitions(-DZLIB)
+    list(APPEND THIRDPARTY_LIBS ZLIB::ZLIB)
+  endif()
+
+  option(WITH_BZ2 "build with bzip2" OFF)
+  if(WITH_BZ2)
+    find_package(BZip2 REQUIRED)
+    add_definitions(-DBZIP2)
+    if(BZIP2_INCLUDE_DIRS)
+      include_directories(${BZIP2_INCLUDE_DIRS})
+    else()
+      include_directories(${BZIP2_INCLUDE_DIR})
+    endif()
+    list(APPEND THIRDPARTY_LIBS ${BZIP2_LIBRARIES})
+  endif()
+
+  if(WITH_LZ4)
+    find_package(lz4 REQUIRED)
+    add_definitions(-DLZ4)
+    list(APPEND THIRDPARTY_LIBS lz4::lz4)
+  endif()
+
+  if(WITH_ZSTD)
+    find_package(zstd REQUIRED)
+    add_definitions(-DZSTD)
+    include_directories(${ZSTD_INCLUDE_DIR})
+    list(APPEND THIRDPARTY_LIBS zstd::zstd)
+  endif()
+endif()
+
+string(TIMESTAMP GIT_DATE_TIME "%Y/%m/%d %H:%M:%S" UTC)
+
+find_package(Git)
+
+if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+  if(WIN32)
+    execute_process(COMMAND $ENV{COMSPEC} /C ${GIT_EXECUTABLE} -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse HEAD OUTPUT_VARIABLE GIT_SHA)
+  else()
+    execute_process(COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse HEAD OUTPUT_VARIABLE GIT_SHA)
+  endif()
+else()
+  set(GIT_SHA 0)
+endif()
+
+string(REGEX REPLACE "[^0-9a-f]+" "" GIT_SHA "${GIT_SHA}")
+
+
+option(WITH_MD_LIBRARY "build with MD" ON)
+if(WIN32 AND MSVC)
+  if(WITH_MD_LIBRARY)
+    set(RUNTIME_LIBRARY "MD")
+  else()
+    set(RUNTIME_LIBRARY "MT")
+  endif()
+endif()
+
+set(BUILD_VERSION_CC ${CMAKE_BINARY_DIR}/build_version.cc)
+configure_file(util/build_version.cc.in ${BUILD_VERSION_CC} @ONLY)
+add_library(build_version OBJECT ${BUILD_VERSION_CC})
+target_include_directories(build_version PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/util)
+if(MSVC)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi /nologo /EHsc /GS /Gd /GR /GF /fp:precise /Zc:wchar_t /Zc:forScope /errorReport:queue")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /FC /d2Zi+ /W4 /wd4127 /wd4800 /wd4996 /wd4351 /wd4100 /wd4204 /wd4324")
+else()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -W -Wextra -Wall")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-compare -Wshadow -Wno-unused-parameter -Wno-unused-variable -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers -Wno-strict-aliasing")
+  if(MINGW)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format")
+    add_definitions(-D_POSIX_C_SOURCE=1)
+  endif()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer")
+    include(CheckCXXCompilerFlag)
+    CHECK_CXX_COMPILER_FLAG("-momit-leaf-frame-pointer" HAVE_OMIT_LEAF_FRAME_POINTER)
+    if(HAVE_OMIT_LEAF_FRAME_POINTER)
+      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -momit-leaf-frame-pointer")
+    endif()
+  endif()
+endif()
+
+include(CheckCCompilerFlag)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le")
+  CHECK_C_COMPILER_FLAG("-maltivec" HAS_ALTIVEC)
+  if(HAS_ALTIVEC)
+    message(STATUS " HAS_ALTIVEC yes")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -maltivec")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -maltivec")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=power8")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=power8")
+  endif(HAS_ALTIVEC)
+endif(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le")
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|AARCH64")
+        CHECK_C_COMPILER_FLAG("-march=armv8-a+crc" HAS_ARMV8_CRC)
+  if(HAS_ARMV8_CRC)
+    message(STATUS " HAS_ARMV8_CRC yes")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8-a+crc -Wno-unused-function")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a+crc -Wno-unused-function")
+  endif(HAS_ARMV8_CRC)
+endif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|AARCH64")
+
+option(PORTABLE "build a portable binary" OFF)
+option(FORCE_SSE42 "force building with SSE4.2, even when PORTABLE=ON" OFF)
+if(PORTABLE)
+  # MSVC does not need a separate compiler flag to enable SSE4.2; if nmmintrin.h
+  # is available, it is available by default.
+  if(FORCE_SSE42 AND NOT MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.2 -mpclmul")
+  endif()
+else()
+  if(MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX2")
+  else()
+    if(NOT HAVE_POWER8 AND NOT HAS_ARMV8_CRC)
+      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+    endif()
+  endif()
+endif()
+
+include(CheckCXXSourceCompiles)
+if(NOT MSVC)
+  set(CMAKE_REQUIRED_FLAGS "-msse4.2 -mpclmul")
+endif()
+CHECK_CXX_SOURCE_COMPILES("
+#include <cstdint>
+#include <nmmintrin.h>
+#include <wmmintrin.h>
+int main() {
+  volatile uint32_t x = _mm_crc32_u32(0, 0);
+  const auto a = _mm_set_epi64x(0, 0);
+  const auto b = _mm_set_epi64x(0, 0);
+  const auto c = _mm_clmulepi64_si128(a, b, 0x00);
+  auto d = _mm_cvtsi128_si64(c);
+}
+" HAVE_SSE42)
+unset(CMAKE_REQUIRED_FLAGS)
+if(HAVE_SSE42)
+  add_definitions(-DHAVE_SSE42)
+  add_definitions(-DHAVE_PCLMUL)
+elseif(FORCE_SSE42)
+  message(FATAL_ERROR "FORCE_SSE42=ON but unable to compile with SSE4.2 enabled")
+endif()
+
+CHECK_CXX_SOURCE_COMPILES("
+#if defined(_MSC_VER) && !defined(__thread)
+#define __thread __declspec(thread)
+#endif
+int main() {
+  static __thread int tls;
+}
+" HAVE_THREAD_LOCAL)
+if(HAVE_THREAD_LOCAL)
+  add_definitions(-DROCKSDB_SUPPORT_THREAD_LOCAL)
+endif()
+
+option(FAIL_ON_WARNINGS "Treat compile warnings as errors" ON)
+if(FAIL_ON_WARNINGS)
+  if(MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /WX")
+  else() # assume GCC
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+  endif()
+endif()
+
+option(WITH_ASAN "build with ASAN" OFF)
+if(WITH_ASAN)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
+  if(WITH_JEMALLOC)
+    message(FATAL "ASAN does not work well with JeMalloc")
+  endif()
+endif()
+
+option(WITH_TSAN "build with TSAN" OFF)
+if(WITH_TSAN)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=thread -pie")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=thread -fPIC")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread -fPIC")
+  if(WITH_JEMALLOC)
+    message(FATAL "TSAN does not work well with JeMalloc")
+  endif()
+endif()
+
+option(WITH_UBSAN "build with UBSAN" OFF)
+if(WITH_UBSAN)
+  add_definitions(-DROCKSDB_UBSAN_RUN)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=undefined")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=undefined")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=undefined")
+  if(WITH_JEMALLOC)
+    message(FATAL "UBSAN does not work well with JeMalloc")
+  endif()
+endif()
+
+option(WITH_NUMA "build with NUMA policy support" OFF)
+if(WITH_NUMA)
+  find_package(NUMA REQUIRED)
+  add_definitions(-DNUMA)
+  include_directories(${NUMA_INCLUDE_DIR})
+  list(APPEND THIRDPARTY_LIBS NUMA::NUMA)
+endif()
+
+option(WITH_TBB "build with Threading Building Blocks (TBB)" OFF)
+if(WITH_TBB)
+  find_package(TBB REQUIRED)
+  add_definitions(-DTBB)
+  list(APPEND THIRDPARTY_LIBS TBB::TBB)
+endif()
+
+# Stall notifications eat some performance from inserts
+option(DISABLE_STALL_NOTIF "Build with stall notifications" OFF)
+if(DISABLE_STALL_NOTIF)
+  add_definitions(-DROCKSDB_DISABLE_STALL_NOTIFICATION)
+endif()
+
+option(WITH_DYNAMIC_EXTENSION "build with dynamic extension support" OFF)
+if(NOT WITH_DYNAMIC_EXTENSION)
+  add_definitions(-DROCKSDB_NO_DYNAMIC_EXTENSION)
+endif()
+
+if(DEFINED USE_RTTI)
+  if(USE_RTTI)
+    message(STATUS "Enabling RTTI")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DROCKSDB_USE_RTTI")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -DROCKSDB_USE_RTTI")
+  else()
+    if(MSVC)
+      message(STATUS "Disabling RTTI in Release builds. Always on in Debug.")
+      set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DROCKSDB_USE_RTTI")
+      set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /GR-")
+    else()
+      message(STATUS "Disabling RTTI in Release builds")
+      set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fno-rtti")
+      set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fno-rtti")
+    endif()
+  endif()
+else()
+  message(STATUS "Enabling RTTI in Debug builds only (default)")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DROCKSDB_USE_RTTI")
+  if(MSVC)
+     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /GR-")
+  else()
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fno-rtti")
+  endif()
+endif()
+
+# Used to run CI build and tests so we can run faster
+option(OPTDBG "Build optimized debug build with MSVC" OFF)
+option(WITH_RUNTIME_DEBUG "build with debug version of runtime library" ON)
+if(MSVC)
+  if(OPTDBG)
+    message(STATUS "Debug optimization is enabled")
+    set(CMAKE_CXX_FLAGS_DEBUG "/Oxt")
+  else()
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Od /RTC1 /Gm")
+  endif()
+  if(WITH_RUNTIME_DEBUG)
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /${RUNTIME_LIBRARY}d")
+  else()
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /${RUNTIME_LIBRARY}")
+  endif()
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /Oxt /Zp8 /Gm- /Gy /${RUNTIME_LIBRARY}")
+
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG")
+endif()
+
+if(CMAKE_COMPILER_IS_GNUCXX)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-builtin-memcmp")
+endif()
+
+option(ROCKSDB_LITE "Build RocksDBLite version" OFF)
+if(ROCKSDB_LITE)
+  add_definitions(-DROCKSDB_LITE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -Os")
+endif()
+
+if(CMAKE_SYSTEM_NAME MATCHES "Cygwin")
+  add_definitions(-fno-builtin-memcmp -DCYGWIN)
+elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+  add_definitions(-DOS_MACOSX)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES arm)
+    add_definitions(-DIOS_CROSS_COMPILE -DROCKSDB_LITE)
+    # no debug info for IOS, that will make our library big
+    add_definitions(-DNDEBUG)
+  endif()
+elseif(CMAKE_SYSTEM_NAME MATCHES "Linux")
+  add_definitions(-DOS_LINUX)
+elseif(CMAKE_SYSTEM_NAME MATCHES "SunOS")
+  add_definitions(-DOS_SOLARIS)
+elseif(CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+  add_definitions(-DOS_FREEBSD)
+elseif(CMAKE_SYSTEM_NAME MATCHES "NetBSD")
+  add_definitions(-DOS_NETBSD)
+elseif(CMAKE_SYSTEM_NAME MATCHES "OpenBSD")
+  add_definitions(-DOS_OPENBSD)
+elseif(CMAKE_SYSTEM_NAME MATCHES "DragonFly")
+  add_definitions(-DOS_DRAGONFLYBSD)
+elseif(CMAKE_SYSTEM_NAME MATCHES "Android")
+  add_definitions(-DOS_ANDROID)
+elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
+  add_definitions(-DWIN32 -DOS_WIN -D_MBCS -DWIN64 -DNOMINMAX)
+  if(MINGW)
+    add_definitions(-D_WIN32_WINNT=_WIN32_WINNT_VISTA)
+  endif()
+endif()
+
+if(NOT WIN32)
+  add_definitions(-DROCKSDB_PLATFORM_POSIX -DROCKSDB_LIB_IO_POSIX)
+endif()
+
+option(WITH_FALLOCATE "build with fallocate" ON)
+if(WITH_FALLOCATE)
+  CHECK_CXX_SOURCE_COMPILES("
+#include <fcntl.h>
+#include <linux/falloc.h>
+int main() {
+ int fd = open(\"/dev/null\", 0);
+ fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 1024);
+}
+" HAVE_FALLOCATE)
+  if(HAVE_FALLOCATE)
+    add_definitions(-DROCKSDB_FALLOCATE_PRESENT)
+  endif()
+endif()
+
+CHECK_CXX_SOURCE_COMPILES("
+#include <fcntl.h>
+int main() {
+  int fd = open(\"/dev/null\", 0);
+  sync_file_range(fd, 0, 1024, SYNC_FILE_RANGE_WRITE);
+}
+" HAVE_SYNC_FILE_RANGE_WRITE)
+if(HAVE_SYNC_FILE_RANGE_WRITE)
+  add_definitions(-DROCKSDB_RANGESYNC_PRESENT)
+endif()
+
+CHECK_CXX_SOURCE_COMPILES("
+#include <pthread.h>
+int main() {
+  (void) PTHREAD_MUTEX_ADAPTIVE_NP;
+}
+" HAVE_PTHREAD_MUTEX_ADAPTIVE_NP)
+if(HAVE_PTHREAD_MUTEX_ADAPTIVE_NP)
+  add_definitions(-DROCKSDB_PTHREAD_ADAPTIVE_MUTEX)
+endif()
+
+include(CheckCXXSymbolExists)
+check_cxx_symbol_exists(malloc_usable_size malloc.h HAVE_MALLOC_USABLE_SIZE)
+if(HAVE_MALLOC_USABLE_SIZE)
+  add_definitions(-DROCKSDB_MALLOC_USABLE_SIZE)
+endif()
+
+check_cxx_symbol_exists(sched_getcpu sched.h HAVE_SCHED_GETCPU)
+if(HAVE_SCHED_GETCPU)
+  add_definitions(-DROCKSDB_SCHED_GETCPU_PRESENT)
+endif()
+
+include_directories(${PROJECT_SOURCE_DIR})
+include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/third-party/gtest-1.7.0/fused-src)
+if(WITH_FOLLY_DISTRIBUTED_MUTEX)
+  include_directories(${PROJECT_SOURCE_DIR}/third-party/folly)
+endif()
+find_package(Threads REQUIRED)
+
+# Main library source code
+
+set(SOURCES
         cache/clock_cache.cc
-        cache/clock_cache.h
         cache/lru_cache.cc
-        cache/lru_cache.h
-        cache/lru_cache_test.cc
         cache/sharded_cache.cc
-        cache/sharded_cache.h
-        cmake/modules/FindJeMalloc.cmake
-        cmake/modules/Findlz4.cmake
-        cmake/modules/FindNUMA.cmake
-        cmake/modules/Findsnappy.cmake
-        cmake/modules/FindTBB.cmake
-        cmake/modules/Findzstd.cmake
-        cmake/modules/ReadVersion.cmake
-        cmake/RocksDBConfig.cmake.in
+        db/builder.cc
+        db/c.cc
+        db/column_family.cc
+        db/compacted_db_impl.cc
         db/compaction/compaction.cc
-        db/compaction/compaction.h
-        db/compaction/compaction_iteration_stats.h
         db/compaction/compaction_iterator.cc
-        db/compaction/compaction_iterator.h
-        db/compaction/compaction_iterator_test.cc
-        db/compaction/compaction_job.cc
-        db/compaction/compaction_job.h
-        db/compaction/compaction_job_stats_test.cc
-        db/compaction/compaction_job_test.cc
         db/compaction/compaction_picker.cc
-        db/compaction/compaction_picker.h
+        db/compaction/compaction_job.cc
         db/compaction/compaction_picker_fifo.cc
-        db/compaction/compaction_picker_fifo.h
         db/compaction/compaction_picker_level.cc
-        db/compaction/compaction_picker_level.h
-        db/compaction/compaction_picker_test.cc
         db/compaction/compaction_picker_universal.cc
-        db/compaction/compaction_picker_universal.h
+        db/convenience.cc
+        db/db_filesnapshot.cc
         db/db_impl/db_impl.cc
-        db/db_impl/db_impl.h
+        db/db_impl/db_impl_write.cc
         db/db_impl/db_impl_compaction_flush.cc
-        db/db_impl/db_impl_debug.cc
-        db/db_impl/db_impl_experimental.cc
         db/db_impl/db_impl_files.cc
         db/db_impl/db_impl_open.cc
+        db/db_impl/db_impl_debug.cc
+        db/db_impl/db_impl_experimental.cc
         db/db_impl/db_impl_readonly.cc
-        db/db_impl/db_impl_readonly.h
         db/db_impl/db_impl_secondary.cc
-        db/db_impl/db_impl_secondary.h
-        db/db_impl/db_impl_write.cc
-        db/db_impl/db_secondary_test.cc
-        db/builder.cc
-        db/builder.h
-        db/c.cc
-        db/c_test.c
-        db/column_family.cc
-        db/column_family.h
+        db/db_info_dumper.cc
+        db/db_iter.cc
+        db/dbformat.cc
+        db/error_handler.cc
+        db/event_helpers.cc
+        db/experimental.cc
+        db/external_sst_file_ingestion_job.cc
+        db/file_indexer.cc
+        db/flush_job.cc
+        db/flush_scheduler.cc
+        db/forward_iterator.cc
+        db/import_column_family_job.cc
+        db/internal_stats.cc
+        db/logs_with_prep_tracker.cc
+        db/log_reader.cc
+        db/log_writer.cc
+        db/malloc_stats.cc
+        db/memtable.cc
+        db/memtable_list.cc
+        db/merge_helper.cc
+        db/merge_operator.cc
+        db/range_del_aggregator.cc
+        db/range_tombstone_fragmenter.cc
+        db/repair.cc
+        db/snapshot_impl.cc
+        db/table_cache.cc
+        db/table_properties_collector.cc
+        db/transaction_log_impl.cc
+        db/trim_history_scheduler.cc
+        db/version_builder.cc
+        db/version_edit.cc
+        db/version_set.cc
+        db/wal_manager.cc
+        db/write_batch.cc
+        db/write_batch_base.cc
+        db/write_controller.cc
+        db/write_thread.cc
+        env/env.cc
+        env/env_chroot.cc
+        env/env_encryption.cc
+        env/env_hdfs.cc
+        env/mock_env.cc
+        file/delete_scheduler.cc
+        file/file_util.cc
+        file/filename.cc
+        file/sst_file_manager_impl.cc
+        logging/auto_roll_logger.cc
+        logging/event_logger.cc
+        logging/log_buffer.cc
+        memory/arena.cc
+        memory/concurrent_arena.cc
+        memory/jemalloc_nodump_allocator.cc
+        memtable/alloc_tracker.cc
+        memtable/hash_linklist_rep.cc
+        memtable/hash_skiplist_rep.cc
+        memtable/skiplistrep.cc
+        memtable/vectorrep.cc
+        memtable/write_buffer_manager.cc
+        monitoring/histogram.cc
+        monitoring/histogram_windowing.cc
+        monitoring/in_memory_stats_history.cc
+        monitoring/instrumented_mutex.cc
+        monitoring/iostats_context.cc
+        monitoring/perf_context.cc
+        monitoring/perf_level.cc
+        monitoring/persistent_stats_history.cc
+        monitoring/statistics.cc
+        monitoring/thread_status_impl.cc
+        monitoring/thread_status_updater.cc
+        monitoring/thread_status_util.cc
+        monitoring/thread_status_util_debug.cc
+        options/cf_options.cc
+        options/db_options.cc
+        options/options.cc
+        options/options_helper.cc
+        options/options_parser.cc
+        options/options_sanity_check.cc
+        port/stack_trace.cc
+        table/adaptive/adaptive_table_factory.cc
+        table/block_based/block.cc
+        table/block_based/block_based_filter_block.cc
+        table/block_based/block_based_table_builder.cc
+        table/block_based/block_based_table_factory.cc
+        table/block_based/block_based_table_reader.cc
+        table/block_based/block_builder.cc
+        table/block_based/block_prefix_index.cc
+        table/block_based/data_block_hash_index.cc
+        table/block_based/data_block_footer.cc
+        table/block_based/filter_block_reader_common.cc
+        table/block_based/flush_block_policy.cc
+        table/block_based/full_filter_block.cc
+        table/block_based/index_builder.cc
+        table/block_based/partitioned_filter_block.cc
+        table/block_based/uncompression_dict_reader.cc
+        table/block_fetcher.cc
+        table/bloom_block.cc
+        table/cuckoo/cuckoo_table_builder.cc
+        table/cuckoo/cuckoo_table_factory.cc
+        table/cuckoo/cuckoo_table_reader.cc
+        table/format.cc
+        table/get_context.cc
+        table/iterator.cc
+        table/merging_iterator.cc
+        table/meta_blocks.cc
+        table/persistent_cache_helper.cc
+        table/plain/plain_table_builder.cc
+        table/plain/plain_table_factory.cc
+        table/plain/plain_table_index.cc
+        table/plain/plain_table_key_coding.cc
+        table/plain/plain_table_reader.cc
+        table/sst_file_reader.cc
+        table/sst_file_writer.cc
+        table/table_properties.cc
+        table/two_level_iterator.cc
+        test_util/sync_point.cc
+        test_util/sync_point_impl.cc
+        test_util/testutil.cc
+        test_util/transaction_test_util.cc
+        tools/block_cache_analyzer/block_cache_trace_analyzer.cc
+        tools/db_bench_tool.cc
+        tools/dump/db_dump_tool.cc
+        tools/ldb_cmd.cc
+        tools/ldb_tool.cc
+        tools/sst_dump_tool.cc
+        tools/trace_analyzer_tool.cc
+        trace_replay/trace_replay.cc
+        trace_replay/block_cache_tracer.cc
+        util/bloom.cc
+        util/coding.cc
+        util/compaction_job_stats_impl.cc
+        util/comparator.cc
+        util/compression_context_cache.cc
+        util/concurrent_task_limiter_impl.cc
+        util/crc32c.cc
+        util/dynamic_bloom.cc
+        util/file_reader_writer.cc
+        util/filter_policy.cc
+        util/hash.cc
+        util/murmurhash.cc
+        util/random.cc
+        util/rate_limiter.cc
+        util/slice.cc
+        util/status.cc
+        util/string_util.cc
+        util/thread_local.cc
+        util/threadpool_imp.cc
+        util/xxhash.cc
+        utilities/backupable/backupable_db.cc
+        utilities/blob_db/blob_compaction_filter.cc
+        utilities/blob_db/blob_db.cc
+        utilities/blob_db/blob_db_impl.cc
+        utilities/blob_db/blob_db_impl_filesnapshot.cc
+        utilities/blob_db/blob_dump_tool.cc
+        utilities/blob_db/blob_file.cc
+        utilities/blob_db/blob_log_reader.cc
+        utilities/blob_db/blob_log_writer.cc
+        utilities/blob_db/blob_log_format.cc
+        utilities/cassandra/cassandra_compaction_filter.cc
+        utilities/cassandra/format.cc
+        utilities/cassandra/merge_operator.cc
+        utilities/checkpoint/checkpoint_impl.cc
+        utilities/compaction_filters/remove_emptyvalue_compactionfilter.cc
+        utilities/debug.cc
+        utilities/env_mirror.cc
+        utilities/env_timed.cc
+        utilities/leveldb_options/leveldb_options.cc
+        utilities/memory/memory_util.cc
+        utilities/merge_operators/bytesxor.cc
+        utilities/merge_operators/max.cc
+        utilities/merge_operators/put.cc
+        utilities/merge_operators/sortlist.cc
+        utilities/merge_operators/string_append/stringappend.cc
+        utilities/merge_operators/string_append/stringappend2.cc
+        utilities/merge_operators/uint64add.cc
+        utilities/object_registry.cc
+        utilities/option_change_migration/option_change_migration.cc
+        utilities/options/options_util.cc
+        utilities/persistent_cache/block_cache_tier.cc
+        utilities/persistent_cache/block_cache_tier_file.cc
+        utilities/persistent_cache/block_cache_tier_metadata.cc
+        utilities/persistent_cache/persistent_cache_tier.cc
+        utilities/persistent_cache/volatile_tier_impl.cc
+        utilities/simulator_cache/cache_simulator.cc
+        utilities/simulator_cache/sim_cache.cc
+        utilities/table_properties_collectors/compact_on_deletion_collector.cc
+        utilities/trace/file_trace_reader_writer.cc
+        utilities/transactions/optimistic_transaction_db_impl.cc
+        utilities/transactions/optimistic_transaction.cc
+        utilities/transactions/pessimistic_transaction.cc
+        utilities/transactions/pessimistic_transaction_db.cc
+        utilities/transactions/snapshot_checker.cc
+        utilities/transactions/transaction_base.cc
+        utilities/transactions/transaction_db_mutex_impl.cc
+        utilities/transactions/transaction_lock_mgr.cc
+        utilities/transactions/transaction_util.cc
+        utilities/transactions/write_prepared_txn.cc
+        utilities/transactions/write_prepared_txn_db.cc
+        utilities/transactions/write_unprepared_txn.cc
+        utilities/transactions/write_unprepared_txn_db.cc
+        utilities/ttl/db_ttl_impl.cc
+        utilities/write_batch_with_index/write_batch_with_index.cc
+        utilities/write_batch_with_index/write_batch_with_index_internal.cc
+        $<TARGET_OBJECTS:build_version>)
+
+if(HAVE_SSE42 AND NOT MSVC)
+  set_source_files_properties(
+    util/crc32c.cc
+    PROPERTIES COMPILE_FLAGS "-msse4.2 -mpclmul")
+endif()
+
+if(HAVE_POWER8)
+  list(APPEND SOURCES
+    util/crc32c_ppc.c
+    util/crc32c_ppc_asm.S)
+endif(HAVE_POWER8)
+
+if(HAS_ARMV8_CRC)
+  list(APPEND SOURCES
+    util/crc32c_arm64.cc)
+endif(HAS_ARMV8_CRC)
+
+if(WIN32)
+  list(APPEND SOURCES
+    port/win/io_win.cc
+    port/win/env_win.cc
+    port/win/env_default.cc
+    port/win/port_win.cc
+    port/win/win_logger.cc
+    port/win/win_thread.cc)
+
+if(WITH_XPRESS)
+  list(APPEND SOURCES
+    port/win/xpress_win.cc)
+endif()
+
+if(WITH_JEMALLOC)
+  list(APPEND SOURCES
+    port/win/win_jemalloc.cc)
+endif()
+
+else()
+  list(APPEND SOURCES
+    port/port_posix.cc
+    env/env_posix.cc
+    env/io_posix.cc)
+endif()
+
+if(WITH_FOLLY_DISTRIBUTED_MUTEX)
+  list(APPEND SOURCES
+    third-party/folly/folly/detail/Futex.cpp
+    third-party/folly/folly/synchronization/AtomicNotification.cpp
+    third-party/folly/folly/synchronization/DistributedMutex.cpp
+    third-party/folly/folly/synchronization/ParkingLot.cpp
+    third-party/folly/folly/synchronization/WaitOptions.cpp)
+endif()
+
+set(ROCKSDB_STATIC_LIB rocksdb${ARTIFACT_SUFFIX})
+set(ROCKSDB_SHARED_LIB rocksdb-shared${ARTIFACT_SUFFIX})
+set(ROCKSDB_IMPORT_LIB ${ROCKSDB_SHARED_LIB})
+
+option(WITH_LIBRADOS "Build with librados" OFF)
+if(WITH_LIBRADOS)
+  list(APPEND SOURCES
+    utilities/env_librados.cc)
+  list(APPEND THIRDPARTY_LIBS rados)
+endif()
+
+if(WIN32)
+  set(SYSTEM_LIBS ${SYSTEM_LIBS} Shlwapi.lib Rpcrt4.lib)
+  set(LIBS ${ROCKSDB_STATIC_LIB} ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+else()
+  set(SYSTEM_LIBS ${CMAKE_THREAD_LIBS_INIT})
+  set(LIBS ${ROCKSDB_SHARED_LIB} ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+
+  add_library(${ROCKSDB_SHARED_LIB} SHARED ${SOURCES})
+  target_link_libraries(${ROCKSDB_SHARED_LIB}
+    ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+  set_target_properties(${ROCKSDB_SHARED_LIB} PROPERTIES
+                        LINKER_LANGUAGE CXX
+                        VERSION ${rocksdb_VERSION}
+                        SOVERSION ${rocksdb_VERSION_MAJOR}
+                        CXX_STANDARD 11
+                        OUTPUT_NAME "rocksdb")
+endif()
+
+add_library(${ROCKSDB_STATIC_LIB} STATIC ${SOURCES})
+target_link_libraries(${ROCKSDB_STATIC_LIB}
+  ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+
+if(WIN32)
+  add_library(${ROCKSDB_IMPORT_LIB} SHARED ${SOURCES})
+  target_link_libraries(${ROCKSDB_IMPORT_LIB}
+    ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+  set_target_properties(${ROCKSDB_IMPORT_LIB} PROPERTIES
+    COMPILE_DEFINITIONS "ROCKSDB_DLL;ROCKSDB_LIBRARY_EXPORTS")
+  if(MSVC)
+    set_target_properties(${ROCKSDB_STATIC_LIB} PROPERTIES
+      COMPILE_FLAGS "/Fd${CMAKE_CFG_INTDIR}/${ROCKSDB_STATIC_LIB}.pdb")
+    set_target_properties(${ROCKSDB_IMPORT_LIB} PROPERTIES
+      COMPILE_FLAGS "/Fd${CMAKE_CFG_INTDIR}/${ROCKSDB_IMPORT_LIB}.pdb")
+  endif()
+endif()
+
+option(WITH_JNI "build with JNI" OFF)
+if(WITH_JNI OR JNI)
+  message(STATUS "JNI library is enabled")
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/java)
+else()
+  message(STATUS "JNI library is disabled")
+endif()
+
+# Installation and packaging
+if(WIN32)
+  option(ROCKSDB_INSTALL_ON_WINDOWS "Enable install target on Windows" OFF)
+endif()
+if(NOT WIN32 OR ROCKSDB_INSTALL_ON_WINDOWS)
+  if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+      # Change default installation prefix on Linux to /usr
+      set(CMAKE_INSTALL_PREFIX /usr CACHE PATH "Install path prefix, prepended onto install directories." FORCE)
+    endif()
+  endif()
+
+  include(GNUInstallDirs)
+  include(CMakePackageConfigHelpers)
+
+  set(package_config_destination ${CMAKE_INSTALL_LIBDIR}/cmake/rocksdb)
+
+  configure_package_config_file(
+    ${CMAKE_CURRENT_LIST_DIR}/cmake/RocksDBConfig.cmake.in RocksDBConfig.cmake
+    INSTALL_DESTINATION ${package_config_destination}
+  )
+
+  write_basic_package_version_file(
+    RocksDBConfigVersion.cmake
+    VERSION ${rocksdb_VERSION}
+    COMPATIBILITY SameMajorVersion
+  )
+
+  install(DIRECTORY include/rocksdb COMPONENT devel DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+
+  install(
+    TARGETS ${ROCKSDB_STATIC_LIB}
+    EXPORT RocksDBTargets
+    COMPONENT devel
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  )
+
+  install(
+    TARGETS ${ROCKSDB_SHARED_LIB}
+    EXPORT RocksDBTargets
+    COMPONENT runtime
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  )
+
+  install(
+    EXPORT RocksDBTargets
+    COMPONENT devel
+    DESTINATION ${package_config_destination}
+    NAMESPACE RocksDB::
+  )
+
+  install(
+    FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/RocksDBConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/RocksDBConfigVersion.cmake
+    COMPONENT devel
+    DESTINATION ${package_config_destination}
+  )
+endif()
+
+option(WITH_TESTS "build with tests" ON)
+if(WITH_TESTS)
+  add_subdirectory(third-party/gtest-1.7.0/fused-src/gtest)
+  set(TESTS
+        cache/cache_test.cc
+        cache/lru_cache_test.cc
         db/column_family_test.cc
         db/compact_files_test.cc
-        db/compacted_db_impl.cc
-        db/compacted_db_impl.h
+        db/compaction/compaction_job_stats_test.cc
+        db/compaction/compaction_job_test.cc
+        db/compaction/compaction_iterator_test.cc
+        db/compaction/compaction_picker_test.cc
         db/comparator_db_test.cc
-        db/convenience.cc
         db/corruption_test.cc
         db/cuckoo_table_db_test.cc
         db/db_basic_test.cc
@@ -131,849 +899,218 @@ add_executable(rocksdb
         db/db_compaction_filter_test.cc
         db/db_compaction_test.cc
         db/db_dynamic_level_test.cc
-        db/db_encryption_test.cc
-        db/db_filesnapshot.cc
         db/db_flush_test.cc
-        db/db_info_dumper.cc
-        db/db_info_dumper.h
         db/db_inplace_update_test.cc
         db/db_io_failure_test.cc
-        db/db_iter.cc
-        db/db_iter.h
-        db/db_iter_stress_test.cc
         db/db_iter_test.cc
+        db/db_iter_stress_test.cc
         db/db_iterator_test.cc
         db/db_log_iter_test.cc
         db/db_memtable_test.cc
-        db/db_merge_operand_test.cc
         db/db_merge_operator_test.cc
+        db/db_merge_operand_test.cc
         db/db_options_test.cc
         db/db_properties_test.cc
         db/db_range_del_test.cc
+        db/db_impl/db_secondary_test.cc
         db/db_sst_test.cc
         db/db_statistics_test.cc
         db/db_table_properties_test.cc
         db/db_tailing_iter_test.cc
         db/db_test.cc
         db/db_test2.cc
-        db/db_test_util.cc
-        db/db_test_util.h
         db/db_universal_compaction_test.cc
         db/db_wal_test.cc
         db/db_write_test.cc
-        db/dbformat.cc
-        db/dbformat.h
         db/dbformat_test.cc
         db/deletefile_test.cc
-        db/error_handler.cc
-        db/error_handler.h
         db/error_handler_test.cc
-        db/event_helpers.cc
-        db/event_helpers.h
-        db/experimental.cc
+        db/obsolete_files_test.cc
         db/external_sst_file_basic_test.cc
-        db/external_sst_file_ingestion_job.cc
-        db/external_sst_file_ingestion_job.h
         db/external_sst_file_test.cc
         db/fault_injection_test.cc
-        db/file_indexer.cc
-        db/file_indexer.h
         db/file_indexer_test.cc
         db/filename_test.cc
-        db/flush_job.cc
-        db/flush_job.h
         db/flush_job_test.cc
-        db/flush_scheduler.cc
-        db/flush_scheduler.h
-        db/forward_iterator.cc
-        db/forward_iterator.h
-        db/forward_iterator_bench.cc
-        db/import_column_family_job.cc
-        db/import_column_family_job.h
-        db/import_column_family_test.cc
-        db/internal_stats.cc
-        db/internal_stats.h
-        db/job_context.h
         db/listener_test.cc
-        db/log_format.h
-        db/log_reader.cc
-        db/log_reader.h
         db/log_test.cc
-        db/log_writer.cc
-        db/log_writer.h
-        db/logs_with_prep_tracker.cc
-        db/logs_with_prep_tracker.h
-        db/lookup_key.h
-        db/malloc_stats.cc
-        db/malloc_stats.h
         db/manual_compaction_test.cc
-        db/memtable.cc
-        db/memtable.h
-        db/memtable_list.cc
-        db/memtable_list.h
         db/memtable_list_test.cc
-        db/merge_context.h
-        db/merge_helper.cc
-        db/merge_helper.h
         db/merge_helper_test.cc
-        db/merge_operator.cc
         db/merge_test.cc
-        db/obsolete_files_test.cc
         db/options_file_test.cc
         db/perf_context_test.cc
-        db/pinned_iterators_manager.h
         db/plain_table_db_test.cc
-        db/pre_release_callback.h
         db/prefix_test.cc
-        db/range_del_aggregator.cc
-        db/range_del_aggregator.h
-        db/range_del_aggregator_bench.cc
         db/range_del_aggregator_test.cc
-        db/range_tombstone_fragmenter.cc
-        db/range_tombstone_fragmenter.h
         db/range_tombstone_fragmenter_test.cc
-        db/read_callback.h
-        db/repair.cc
         db/repair_test.cc
-        db/snapshot_checker.h
-        db/snapshot_impl.cc
-        db/snapshot_impl.h
-        db/table_cache.cc
-        db/table_cache.h
-        db/table_properties_collector.cc
-        db/table_properties_collector.h
         db/table_properties_collector_test.cc
-        db/transaction_log_impl.cc
-        db/transaction_log_impl.h
-        db/trim_history_scheduler.cc
-        db/trim_history_scheduler.h
-        db/version_builder.cc
-        db/version_builder.h
         db/version_builder_test.cc
-        db/version_edit.cc
-        db/version_edit.h
         db/version_edit_test.cc
-        db/version_set.cc
-        db/version_set.h
         db/version_set_test.cc
-        db/wal_manager.cc
-        db/wal_manager.h
         db/wal_manager_test.cc
-        db/write_batch.cc
-        db/write_batch_base.cc
-        db/write_batch_internal.h
         db/write_batch_test.cc
-        db/write_callback.h
         db/write_callback_test.cc
-        db/write_controller.cc
-        db/write_controller.h
         db/write_controller_test.cc
-        db/write_thread.cc
-        db/write_thread.h
-        env/env.cc
         env/env_basic_test.cc
-        env/env_chroot.cc
-        env/env_chroot.h
-        env/env_encryption.cc
-        env/env_hdfs.cc
-        env/env_posix.cc
         env/env_test.cc
-        env/io_posix.cc
-        env/io_posix.h
-        env/mock_env.cc
-        env/mock_env.h
         env/mock_env_test.cc
-        examples/c_simple_example.c
-        examples/column_families_example.cc
-        examples/compact_files_example.cc
-        examples/compaction_filter_example.cc
-        examples/multi_processes_example.cc
-        examples/optimistic_transaction_example.cc
-        examples/options_file_example.cc
-        examples/simple_example.cc
-        examples/transaction_example.cc
-        file/delete_scheduler.cc
-        file/delete_scheduler.h
         file/delete_scheduler_test.cc
-        file/file_util.cc
-        file/file_util.h
-        file/filename.cc
-        file/filename.h
-        file/sst_file_manager_impl.cc
-        file/sst_file_manager_impl.h
-        hdfs/env_hdfs.h
-        include/rocksdb/utilities/lua/rocks_lua_custom_library.h
-        include/rocksdb/utilities/lua/rocks_lua_util.h
-        include/rocksdb/utilities/backupable_db.h
-        include/rocksdb/utilities/checkpoint.h
-        include/rocksdb/utilities/convenience.h
-        include/rocksdb/utilities/db_ttl.h
-        include/rocksdb/utilities/debug.h
-        include/rocksdb/utilities/env_librados.h
-        include/rocksdb/utilities/env_mirror.h
-        include/rocksdb/utilities/info_log_finder.h
-        include/rocksdb/utilities/ldb_cmd.h
-        include/rocksdb/utilities/ldb_cmd_execute_result.h
-        include/rocksdb/utilities/leveldb_options.h
-        include/rocksdb/utilities/memory_util.h
-        include/rocksdb/utilities/object_registry.h
-        include/rocksdb/utilities/optimistic_transaction_db.h
-        include/rocksdb/utilities/option_change_migration.h
-        include/rocksdb/utilities/options_util.h
-        include/rocksdb/utilities/sim_cache.h
-        include/rocksdb/utilities/stackable_db.h
-        include/rocksdb/utilities/table_properties_collectors.h
-        include/rocksdb/utilities/transaction.h
-        include/rocksdb/utilities/transaction_db.h
-        include/rocksdb/utilities/transaction_db_mutex.h
-        include/rocksdb/utilities/utility_db.h
-        include/rocksdb/utilities/write_batch_with_index.h
-        include/rocksdb/advanced_options.h
-        include/rocksdb/c.h
-        include/rocksdb/cache.h
-        include/rocksdb/cleanable.h
-        include/rocksdb/compaction_filter.h
-        include/rocksdb/compaction_job_stats.h
-        include/rocksdb/comparator.h
-        include/rocksdb/concurrent_task_limiter.h
-        include/rocksdb/convenience.h
-        include/rocksdb/db.h
-        include/rocksdb/db_bench_tool.h
-        include/rocksdb/db_dump_tool.h
-        include/rocksdb/env.h
-        include/rocksdb/env_encryption.h
-        include/rocksdb/experimental.h
-        include/rocksdb/filter_policy.h
-        include/rocksdb/flush_block_policy.h
-        include/rocksdb/iostats_context.h
-        include/rocksdb/iterator.h
-        include/rocksdb/ldb_tool.h
-        include/rocksdb/listener.h
-        include/rocksdb/memory_allocator.h
-        include/rocksdb/memtablerep.h
-        include/rocksdb/merge_operator.h
-        include/rocksdb/metadata.h
-        include/rocksdb/options.h
-        include/rocksdb/perf_context.h
-        include/rocksdb/perf_level.h
-        include/rocksdb/persistent_cache.h
-        include/rocksdb/rate_limiter.h
-        include/rocksdb/slice.h
-        include/rocksdb/slice_transform.h
-        include/rocksdb/snapshot.h
-        include/rocksdb/sst_dump_tool.h
-        include/rocksdb/sst_file_manager.h
-        include/rocksdb/sst_file_reader.h
-        include/rocksdb/sst_file_writer.h
-        include/rocksdb/statistics.h
-        include/rocksdb/stats_history.h
-        include/rocksdb/status.h
-        include/rocksdb/table.h
-        include/rocksdb/table_properties.h
-        include/rocksdb/thread_status.h
-        include/rocksdb/threadpool.h
-        include/rocksdb/trace_reader_writer.h
-        include/rocksdb/transaction_log.h
-        include/rocksdb/types.h
-        include/rocksdb/universal_compaction.h
-        include/rocksdb/version.h
-        include/rocksdb/wal_filter.h
-        include/rocksdb/write_batch.h
-        include/rocksdb/write_batch_base.h
-        include/rocksdb/write_buffer_manager.h
-        java/rocksjni/backupablejni.cc
-        java/rocksjni/backupenginejni.cc
-        java/rocksjni/cassandra_compactionfilterjni.cc
-        java/rocksjni/cassandra_value_operator.cc
-        java/rocksjni/checkpoint.cc
-        java/rocksjni/clock_cache.cc
-        java/rocksjni/columnfamilyhandle.cc
-        java/rocksjni/compact_range_options.cc
-        java/rocksjni/compaction_filter.cc
-        java/rocksjni/compaction_filter_factory.cc
-        java/rocksjni/compaction_filter_factory_jnicallback.cc
-        java/rocksjni/compaction_filter_factory_jnicallback.h
-        java/rocksjni/compaction_job_info.cc
-        java/rocksjni/compaction_job_stats.cc
-        java/rocksjni/compaction_options.cc
-        java/rocksjni/compaction_options_fifo.cc
-        java/rocksjni/compaction_options_universal.cc
-        java/rocksjni/comparator.cc
-        java/rocksjni/comparatorjnicallback.cc
-        java/rocksjni/comparatorjnicallback.h
-        java/rocksjni/compression_options.cc
-        java/rocksjni/env.cc
-        java/rocksjni/env_options.cc
-        java/rocksjni/filter.cc
-        java/rocksjni/ingest_external_file_options.cc
-        java/rocksjni/iterator.cc
-        java/rocksjni/jnicallback.cc
-        java/rocksjni/jnicallback.h
-        java/rocksjni/loggerjnicallback.cc
-        java/rocksjni/loggerjnicallback.h
-        java/rocksjni/lru_cache.cc
-        java/rocksjni/memory_util.cc
-        java/rocksjni/memtablejni.cc
-        java/rocksjni/merge_operator.cc
-        java/rocksjni/native_comparator_wrapper_test.cc
-        java/rocksjni/optimistic_transaction_db.cc
-        java/rocksjni/optimistic_transaction_options.cc
-        java/rocksjni/options.cc
-        java/rocksjni/options_util.cc
-        java/rocksjni/persistent_cache.cc
-        java/rocksjni/portal.h
-        java/rocksjni/ratelimiterjni.cc
-        java/rocksjni/remove_emptyvalue_compactionfilterjni.cc
-        java/rocksjni/restorejni.cc
-        java/rocksjni/rocks_callback_object.cc
-        java/rocksjni/rocksdb_exception_test.cc
-        java/rocksjni/rocksjni.cc
-        java/rocksjni/slice.cc
-        java/rocksjni/snapshot.cc
-        java/rocksjni/sst_file_manager.cc
-        java/rocksjni/sst_file_writerjni.cc
-        java/rocksjni/statistics.cc
-        java/rocksjni/statisticsjni.cc
-        java/rocksjni/statisticsjni.h
-        java/rocksjni/table.cc
-        java/rocksjni/table_filter.cc
-        java/rocksjni/table_filter_jnicallback.cc
-        java/rocksjni/table_filter_jnicallback.h
-        java/rocksjni/thread_status.cc
-        java/rocksjni/trace_writer.cc
-        java/rocksjni/trace_writer_jnicallback.cc
-        java/rocksjni/trace_writer_jnicallback.h
-        java/rocksjni/transaction.cc
-        java/rocksjni/transaction_db.cc
-        java/rocksjni/transaction_db_options.cc
-        java/rocksjni/transaction_log.cc
-        java/rocksjni/transaction_notifier.cc
-        java/rocksjni/transaction_notifier_jnicallback.cc
-        java/rocksjni/transaction_notifier_jnicallback.h
-        java/rocksjni/transaction_options.cc
-        java/rocksjni/ttl.cc
-        java/rocksjni/wal_filter.cc
-        java/rocksjni/wal_filter_jnicallback.cc
-        java/rocksjni/wal_filter_jnicallback.h
-        java/rocksjni/write_batch.cc
-        java/rocksjni/write_batch_test.cc
-        java/rocksjni/write_batch_with_index.cc
-        java/rocksjni/write_buffer_manager.cc
-        java/rocksjni/writebatchhandlerjnicallback.cc
-        java/rocksjni/writebatchhandlerjnicallback.h
-        logging/auto_roll_logger.cc
-        logging/auto_roll_logger.h
         logging/auto_roll_logger_test.cc
-        logging/env_logger.h
         logging/env_logger_test.cc
-        logging/event_logger.cc
-        logging/event_logger.h
         logging/event_logger_test.cc
-        logging/log_buffer.cc
-        logging/log_buffer.h
-        logging/logging.h
-        logging/posix_logger.h
-        memory/allocator.h
-        memory/arena.cc
-        memory/arena.h
         memory/arena_test.cc
-        memory/concurrent_arena.cc
-        memory/concurrent_arena.h
-        memory/jemalloc_nodump_allocator.cc
-        memory/jemalloc_nodump_allocator.h
-        memory/memory_allocator.h
-        memory/memory_usage.h
-        memtable/alloc_tracker.cc
-        memtable/hash_linklist_rep.cc
-        memtable/hash_linklist_rep.h
-        memtable/hash_skiplist_rep.cc
-        memtable/hash_skiplist_rep.h
-        memtable/inlineskiplist.h
         memtable/inlineskiplist_test.cc
-        memtable/memtablerep_bench.cc
-        memtable/skiplist.h
         memtable/skiplist_test.cc
-        memtable/skiplistrep.cc
-        memtable/stl_wrappers.h
-        memtable/vectorrep.cc
-        memtable/write_buffer_manager.cc
         memtable/write_buffer_manager_test.cc
-        monitoring/file_read_sample.h
-        monitoring/histogram.cc
-        monitoring/histogram.h
         monitoring/histogram_test.cc
-        monitoring/histogram_windowing.cc
-        monitoring/histogram_windowing.h
-        monitoring/in_memory_stats_history.cc
-        monitoring/in_memory_stats_history.h
-        monitoring/instrumented_mutex.cc
-        monitoring/instrumented_mutex.h
-        monitoring/iostats_context.cc
-        monitoring/iostats_context_imp.h
         monitoring/iostats_context_test.cc
-        monitoring/perf_context.cc
-        monitoring/perf_context_imp.h
-        monitoring/perf_level.cc
-        monitoring/perf_level_imp.h
-        monitoring/perf_step_timer.h
-        monitoring/persistent_stats_history.cc
-        monitoring/persistent_stats_history.h
-        monitoring/statistics.cc
-        monitoring/statistics.h
         monitoring/statistics_test.cc
         monitoring/stats_history_test.cc
-        monitoring/thread_status_impl.cc
-        monitoring/thread_status_updater.cc
-        monitoring/thread_status_updater.h
-        monitoring/thread_status_updater_debug.cc
-        monitoring/thread_status_util.cc
-        monitoring/thread_status_util.h
-        monitoring/thread_status_util_debug.cc
-        options/cf_options.cc
-        options/cf_options.h
-        options/db_options.cc
-        options/db_options.h
-        options/options.cc
-        options/options_helper.cc
-        options/options_helper.h
-        options/options_parser.cc
-        options/options_parser.h
-        options/options_sanity_check.cc
-        options/options_sanity_check.h
         options/options_settable_test.cc
         options/options_test.cc
-        port/win/env_default.cc
-        port/win/env_win.cc
-        port/win/env_win.h
-        port/win/io_win.cc
-        port/win/io_win.h
-        port/win/port_win.cc
-        port/win/port_win.h
-        port/win/win_jemalloc.cc
-        port/win/win_logger.cc
-        port/win/win_logger.h
-        port/win/win_thread.cc
-        port/win/win_thread.h
-        port/win/xpress_win.cc
-        port/win/xpress_win.h
-        port/jemalloc_helper.h
-        port/likely.h
-        port/port.h
-        port/port_dirent.h
-        port/port_example.h
-        port/port_posix.cc
-        port/port_posix.h
-        port/stack_trace.cc
-        port/stack_trace.h
-        port/sys_time.h
-        port/util_logger.h
-        port/xpress.h
-        table/adaptive/adaptive_table_factory.cc
-        table/adaptive/adaptive_table_factory.h
-        table/block_based/block.cc
-        table/block_based/block.h
-        table/block_based/block_based_filter_block.cc
-        table/block_based/block_based_filter_block.h
         table/block_based/block_based_filter_block_test.cc
-        table/block_based/block_based_table_builder.cc
-        table/block_based/block_based_table_builder.h
-        table/block_based/block_based_table_factory.cc
-        table/block_based/block_based_table_factory.h
-        table/block_based/block_based_table_reader.cc
-        table/block_based/block_based_table_reader.h
-        table/block_based/block_builder.cc
-        table/block_based/block_builder.h
-        table/block_based/block_prefix_index.cc
-        table/block_based/block_prefix_index.h
         table/block_based/block_test.cc
-        table/block_based/block_type.h
-        table/block_based/cachable_entry.h
-        table/block_based/data_block_footer.cc
-        table/block_based/data_block_footer.h
-        table/block_based/data_block_hash_index.cc
-        table/block_based/data_block_hash_index.h
         table/block_based/data_block_hash_index_test.cc
-        table/block_based/filter_block.h
-        table/block_based/filter_block_reader_common.cc
-        table/block_based/filter_block_reader_common.h
-        table/block_based/flush_block_policy.cc
-        table/block_based/flush_block_policy.h
-        table/block_based/full_filter_block.cc
-        table/block_based/full_filter_block.h
         table/block_based/full_filter_block_test.cc
-        table/block_based/index_builder.cc
-        table/block_based/index_builder.h
-        table/block_based/partitioned_filter_block.cc
-        table/block_based/partitioned_filter_block.h
         table/block_based/partitioned_filter_block_test.cc
-        table/block_based/uncompression_dict_reader.cc
-        table/block_based/uncompression_dict_reader.h
-        table/cuckoo/cuckoo_table_builder.cc
-        table/cuckoo/cuckoo_table_builder.h
-        table/cuckoo/cuckoo_table_builder_test.cc
-        table/cuckoo/cuckoo_table_factory.cc
-        table/cuckoo/cuckoo_table_factory.h
-        table/cuckoo/cuckoo_table_reader.cc
-        table/cuckoo/cuckoo_table_reader.h
-        table/cuckoo/cuckoo_table_reader_test.cc
-        table/plain/plain_table_builder.cc
-        table/plain/plain_table_builder.h
-        table/plain/plain_table_factory.cc
-        table/plain/plain_table_factory.h
-        table/plain/plain_table_index.cc
-        table/plain/plain_table_index.h
-        table/plain/plain_table_key_coding.cc
-        table/plain/plain_table_key_coding.h
-        table/plain/plain_table_reader.cc
-        table/plain/plain_table_reader.h
-        table/block_fetcher.cc
-        table/block_fetcher.h
-        table/bloom_block.cc
-        table/bloom_block.h
         table/cleanable_test.cc
-        table/format.cc
-        table/format.h
-        table/full_filter_bits_builder.h
-        table/get_context.cc
-        table/get_context.h
-        table/internal_iterator.h
-        table/iter_heap.h
-        table/iterator.cc
-        table/iterator_wrapper.h
+        table/cuckoo/cuckoo_table_builder_test.cc
+        table/cuckoo/cuckoo_table_reader_test.cc
         table/merger_test.cc
-        table/merging_iterator.cc
-        table/merging_iterator.h
-        table/meta_blocks.cc
-        table/meta_blocks.h
-        table/mock_table.cc
-        table/mock_table.h
-        table/multiget_context.h
-        table/persistent_cache_helper.cc
-        table/persistent_cache_helper.h
-        table/persistent_cache_options.h
-        table/scoped_arena_iterator.h
-        table/sst_file_reader.cc
         table/sst_file_reader_test.cc
-        table/sst_file_writer.cc
-        table/sst_file_writer_collectors.h
-        table/table_builder.h
-        table/table_properties.cc
-        table/table_properties_internal.h
-        table/table_reader.h
-        table/table_reader_bench.cc
-        table/table_reader_caller.h
         table/table_test.cc
-        table/two_level_iterator.cc
-        table/two_level_iterator.h
-        test_util/fault_injection_test_env.cc
-        test_util/fault_injection_test_env.h
-        test_util/mock_time_env.h
-        test_util/sync_point.cc
-        test_util/sync_point.h
-        test_util/sync_point_impl.cc
-        test_util/sync_point_impl.h
-        test_util/testharness.cc
-        test_util/testharness.h
-        test_util/testutil.cc
-        test_util/testutil.h
-        test_util/transaction_test_util.cc
-        test_util/transaction_test_util.h
-        third-party/folly/folly/chrono/Hardware.h
-        third-party/folly/folly/container/Array.h
-        third-party/folly/folly/detail/Futex-inl.h
-        third-party/folly/folly/detail/Futex.cpp
-        third-party/folly/folly/detail/Futex.h
-        third-party/folly/folly/functional/Invoke.h
-        third-party/folly/folly/hash/Hash.h
-        third-party/folly/folly/lang/Align.h
-        third-party/folly/folly/lang/Bits.h
-        third-party/folly/folly/lang/Launder.h
-        third-party/folly/folly/portability/Asm.h
-        third-party/folly/folly/portability/SysSyscall.h
-        third-party/folly/folly/portability/SysTypes.h
-        third-party/folly/folly/synchronization/detail/InlineFunctionRef.h
-        third-party/folly/folly/synchronization/detail/ProxyLockable-inl.h
-        third-party/folly/folly/synchronization/detail/ProxyLockable.h
-        third-party/folly/folly/synchronization/detail/Sleeper.h
-        third-party/folly/folly/synchronization/detail/Spin.h
-        third-party/folly/folly/synchronization/test/DistributedMutexTest.cpp
-        third-party/folly/folly/synchronization/AtomicNotification-inl.h
-        third-party/folly/folly/synchronization/AtomicNotification.cpp
-        third-party/folly/folly/synchronization/AtomicNotification.h
-        third-party/folly/folly/synchronization/AtomicUtil-inl.h
-        third-party/folly/folly/synchronization/AtomicUtil.h
-        third-party/folly/folly/synchronization/Baton.h
-        third-party/folly/folly/synchronization/DistributedMutex-inl.h
-        third-party/folly/folly/synchronization/DistributedMutex.cpp
-        third-party/folly/folly/synchronization/DistributedMutex.h
-        third-party/folly/folly/synchronization/DistributedMutexSpecializations.h
-        third-party/folly/folly/synchronization/ParkingLot.cpp
-        third-party/folly/folly/synchronization/ParkingLot.h
-        third-party/folly/folly/synchronization/WaitOptions.cpp
-        third-party/folly/folly/synchronization/WaitOptions.h
-        third-party/folly/folly/ConstexprMath.h
-        third-party/folly/folly/CPortability.h
-        third-party/folly/folly/Indestructible.h
-        third-party/folly/folly/Optional.h
-        third-party/folly/folly/Portability.h
-        third-party/folly/folly/ScopeGuard.h
-        third-party/folly/folly/Traits.h
-        third-party/folly/folly/Unit.h
-        third-party/folly/folly/Utility.h
-        third-party/gtest-1.7.0/fused-src/gtest/gtest-all.cc
-        third-party/gtest-1.7.0/fused-src/gtest/gtest.h
-        tools/block_cache_analyzer/block_cache_trace_analyzer.cc
-        tools/block_cache_analyzer/block_cache_trace_analyzer.h
         tools/block_cache_analyzer/block_cache_trace_analyzer_test.cc
-        tools/block_cache_analyzer/block_cache_trace_analyzer_tool.cc
-        tools/dump/db_dump_tool.cc
-        tools/dump/rocksdb_dump.cc
-        tools/dump/rocksdb_undump.cc
-        tools/rdb/db_wrapper.cc
-        tools/rdb/db_wrapper.h
-        tools/rdb/rdb.cc
-        tools/blob_dump.cc
-        tools/db_bench.cc
-        tools/db_bench_tool.cc
-        tools/db_bench_tool_test.cc
-        tools/db_repl_stress.cc
-        tools/db_sanity_test.cc
-        tools/db_stress.cc
-        tools/ldb.cc
-        tools/ldb_cmd.cc
-        tools/ldb_cmd_impl.h
         tools/ldb_cmd_test.cc
-        tools/ldb_tool.cc
         tools/reduce_levels_test.cc
-        tools/sst_dump.cc
         tools/sst_dump_test.cc
-        tools/sst_dump_tool.cc
-        tools/sst_dump_tool_imp.h
-        tools/trace_analyzer.cc
         tools/trace_analyzer_test.cc
-        tools/trace_analyzer_tool.cc
-        tools/trace_analyzer_tool.h
-        tools/write_stress.cc
-        trace_replay/block_cache_tracer.cc
-        trace_replay/block_cache_tracer.h
-        trace_replay/block_cache_tracer_test.cc
-        trace_replay/trace_replay.cc
-        trace_replay/trace_replay.h
-        util/aligned_buffer.h
-        util/autovector.h
         util/autovector_test.cc
-        util/bloom.cc
         util/bloom_test.cc
-        util/build_version.cc
-        util/build_version.h
-        util/cast_util.h
-        util/channel.h
-        util/coding.cc
-        util/coding.h
         util/coding_test.cc
-        util/compaction_job_stats_impl.cc
-        util/comparator.cc
-        util/compression.h
-        util/compression_context_cache.cc
-        util/compression_context_cache.h
-        util/concurrent_task_limiter_impl.cc
-        util/concurrent_task_limiter_impl.h
-        util/core_local.h
-        util/crc32c.cc
-        util/crc32c.h
-        util/crc32c_arm64.cc
-        util/crc32c_arm64.h
-        util/crc32c_ppc.c
-        util/crc32c_ppc.h
-        util/crc32c_ppc_constants.h
         util/crc32c_test.cc
-        util/duplicate_detector.h
-        util/dynamic_bloom.cc
-        util/dynamic_bloom.h
         util/dynamic_bloom_test.cc
-        util/file_reader_writer.cc
-        util/file_reader_writer.h
         util/file_reader_writer_test.cc
         util/filelock_test.cc
-        util/filter_policy.cc
-        util/gflags_compat.h
-        util/hash.cc
-        util/hash.h
-        util/hash_map.h
         util/hash_test.cc
-        util/heap.h
         util/heap_test.cc
-        util/kv_map.h
-        util/log_write_bench.cc
-        util/murmurhash.cc
-        util/murmurhash.h
-        util/mutexlock.h
-        util/ppc-opcode.h
-        util/random.cc
-        util/random.h
-        util/rate_limiter.cc
-        util/rate_limiter.h
         util/rate_limiter_test.cc
-        util/repeatable_thread.h
         util/repeatable_thread_test.cc
-        util/set_comparator.h
-        util/slice.cc
         util/slice_transform_test.cc
-        util/status.cc
-        util/stderr_logger.h
-        util/stop_watch.h
-        util/string_util.cc
-        util/string_util.h
-        util/thread_list_test.cc
-        util/thread_local.cc
-        util/thread_local.h
-        util/thread_local_test.cc
-        util/thread_operation.h
-        util/threadpool_imp.cc
-        util/threadpool_imp.h
-        util/timer_queue.h
         util/timer_queue_test.cc
-        util/user_comparator_wrapper.h
-        util/util.h
-        util/vector_iterator.h
-        util/xxhash.cc
-        util/xxhash.h
-        utilities/backupable/backupable_db.cc
+        util/thread_list_test.cc
+        util/thread_local_test.cc
         utilities/backupable/backupable_db_test.cc
-        utilities/blob_db/blob_compaction_filter.cc
-        utilities/blob_db/blob_compaction_filter.h
-        utilities/blob_db/blob_db.cc
-        utilities/blob_db/blob_db.h
-        utilities/blob_db/blob_db_impl.cc
-        utilities/blob_db/blob_db_impl.h
-        utilities/blob_db/blob_db_impl_filesnapshot.cc
-        utilities/blob_db/blob_db_iterator.h
-        utilities/blob_db/blob_db_listener.h
         utilities/blob_db/blob_db_test.cc
-        utilities/blob_db/blob_dump_tool.cc
-        utilities/blob_db/blob_dump_tool.h
-        utilities/blob_db/blob_file.cc
-        utilities/blob_db/blob_file.h
-        utilities/blob_db/blob_index.h
-        utilities/blob_db/blob_log_format.cc
-        utilities/blob_db/blob_log_format.h
-        utilities/blob_db/blob_log_reader.cc
-        utilities/blob_db/blob_log_reader.h
-        utilities/blob_db/blob_log_writer.cc
-        utilities/blob_db/blob_log_writer.h
-        utilities/cassandra/cassandra_compaction_filter.cc
-        utilities/cassandra/cassandra_compaction_filter.h
-        utilities/cassandra/cassandra_format_test.cc
         utilities/cassandra/cassandra_functional_test.cc
+        utilities/cassandra/cassandra_format_test.cc
         utilities/cassandra/cassandra_row_merge_test.cc
         utilities/cassandra/cassandra_serialize_test.cc
-        utilities/cassandra/format.cc
-        utilities/cassandra/format.h
-        utilities/cassandra/merge_operator.cc
-        utilities/cassandra/merge_operator.h
-        utilities/cassandra/serialize.h
-        utilities/cassandra/test_utils.cc
-        utilities/cassandra/test_utils.h
-        utilities/checkpoint/checkpoint_impl.cc
-        utilities/checkpoint/checkpoint_impl.h
         utilities/checkpoint/checkpoint_test.cc
-        utilities/compaction_filters/remove_emptyvalue_compactionfilter.cc
-        utilities/compaction_filters/remove_emptyvalue_compactionfilter.h
-        utilities/convenience/info_log_finder.cc
-        utilities/leveldb_options/leveldb_options.cc
         utilities/memory/memory_test.cc
-        utilities/memory/memory_util.cc
-        utilities/merge_operators/string_append/stringappend.cc
-        utilities/merge_operators/string_append/stringappend.h
-        utilities/merge_operators/string_append/stringappend2.cc
-        utilities/merge_operators/string_append/stringappend2.h
         utilities/merge_operators/string_append/stringappend_test.cc
-        utilities/merge_operators/bytesxor.cc
-        utilities/merge_operators/bytesxor.h
-        utilities/merge_operators/max.cc
-        utilities/merge_operators/put.cc
-        utilities/merge_operators/sortlist.cc
-        utilities/merge_operators/sortlist.h
-        utilities/merge_operators/uint64add.cc
-        utilities/option_change_migration/option_change_migration.cc
-        utilities/option_change_migration/option_change_migration_test.cc
-        utilities/options/options_util.cc
-        utilities/options/options_util_test.cc
-        utilities/persistent_cache/block_cache_tier.cc
-        utilities/persistent_cache/block_cache_tier.h
-        utilities/persistent_cache/block_cache_tier_file.cc
-        utilities/persistent_cache/block_cache_tier_file.h
-        utilities/persistent_cache/block_cache_tier_file_buffer.h
-        utilities/persistent_cache/block_cache_tier_metadata.cc
-        utilities/persistent_cache/block_cache_tier_metadata.h
-        utilities/persistent_cache/hash_table.h
-        utilities/persistent_cache/hash_table_bench.cc
-        utilities/persistent_cache/hash_table_evictable.h
-        utilities/persistent_cache/hash_table_test.cc
-        utilities/persistent_cache/lrulist.h
-        utilities/persistent_cache/persistent_cache_bench.cc
-        utilities/persistent_cache/persistent_cache_test.cc
-        utilities/persistent_cache/persistent_cache_test.h
-        utilities/persistent_cache/persistent_cache_tier.cc
-        utilities/persistent_cache/persistent_cache_tier.h
-        utilities/persistent_cache/persistent_cache_util.h
-        utilities/persistent_cache/volatile_tier_impl.cc
-        utilities/persistent_cache/volatile_tier_impl.h
-        utilities/simulator_cache/cache_simulator.cc
-        utilities/simulator_cache/cache_simulator.h
-        utilities/simulator_cache/cache_simulator_test.cc
-        utilities/simulator_cache/sim_cache.cc
-        utilities/simulator_cache/sim_cache_test.cc
-        utilities/table_properties_collectors/compact_on_deletion_collector.cc
-        utilities/table_properties_collectors/compact_on_deletion_collector.h
-        utilities/table_properties_collectors/compact_on_deletion_collector_test.cc
-        utilities/trace/file_trace_reader_writer.cc
-        utilities/trace/file_trace_reader_writer.h
-        utilities/transactions/optimistic_transaction.cc
-        utilities/transactions/optimistic_transaction.h
-        utilities/transactions/optimistic_transaction_db_impl.cc
-        utilities/transactions/optimistic_transaction_db_impl.h
-        utilities/transactions/optimistic_transaction_test.cc
-        utilities/transactions/pessimistic_transaction.cc
-        utilities/transactions/pessimistic_transaction.h
-        utilities/transactions/pessimistic_transaction_db.cc
-        utilities/transactions/pessimistic_transaction_db.h
-        utilities/transactions/snapshot_checker.cc
-        utilities/transactions/transaction_base.cc
-        utilities/transactions/transaction_base.h
-        utilities/transactions/transaction_db_mutex_impl.cc
-        utilities/transactions/transaction_db_mutex_impl.h
-        utilities/transactions/transaction_lock_mgr.cc
-        utilities/transactions/transaction_lock_mgr.h
-        utilities/transactions/transaction_test.cc
-        utilities/transactions/transaction_test.h
-        utilities/transactions/transaction_util.cc
-        utilities/transactions/transaction_util.h
-        utilities/transactions/write_prepared_transaction_test.cc
-        utilities/transactions/write_prepared_txn.cc
-        utilities/transactions/write_prepared_txn.h
-        utilities/transactions/write_prepared_txn_db.cc
-        utilities/transactions/write_prepared_txn_db.h
-        utilities/transactions/write_unprepared_transaction_test.cc
-        utilities/transactions/write_unprepared_txn.cc
-        utilities/transactions/write_unprepared_txn.h
-        utilities/transactions/write_unprepared_txn_db.cc
-        utilities/transactions/write_unprepared_txn_db.h
-        utilities/ttl/db_ttl_impl.cc
-        utilities/ttl/db_ttl_impl.h
-        utilities/ttl/ttl_test.cc
-        utilities/write_batch_with_index/write_batch_with_index.cc
-        utilities/write_batch_with_index/write_batch_with_index_internal.cc
-        utilities/write_batch_with_index/write_batch_with_index_internal.h
-        utilities/write_batch_with_index/write_batch_with_index_test.cc
-        utilities/debug.cc
-        utilities/env_librados.cc
-        utilities/env_librados_test.cc
-        utilities/env_mirror.cc
-        utilities/env_mirror_test.cc
-        utilities/env_timed.cc
-        utilities/env_timed_test.cc
-        utilities/merge_operators.h
-        utilities/object_registry.cc
         utilities/object_registry_test.cc
-        utilities/util_merge_operators_test.cc)
+        utilities/option_change_migration/option_change_migration_test.cc
+        utilities/options/options_util_test.cc
+        utilities/persistent_cache/hash_table_test.cc
+        utilities/persistent_cache/persistent_cache_test.cc
+        utilities/simulator_cache/cache_simulator_test.cc
+        utilities/simulator_cache/sim_cache_test.cc
+        utilities/table_properties_collectors/compact_on_deletion_collector_test.cc
+        utilities/transactions/optimistic_transaction_test.cc
+        utilities/transactions/transaction_test.cc
+        utilities/transactions/write_prepared_transaction_test.cc
+        utilities/transactions/write_unprepared_transaction_test.cc
+        utilities/ttl/ttl_test.cc
+        utilities/write_batch_with_index/write_batch_with_index_test.cc
+  )
+  if(WITH_LIBRADOS)
+    list(APPEND TESTS utilities/env_librados_test.cc)
+  endif()
+
+  if(WITH_FOLLY_DISTRIBUTED_MUTEX)
+    list(APPEND TESTS third-party/folly/folly/synchronization/test/DistributedMutexTest.cpp)
+  endif()
+
+  set(BENCHMARKS
+    cache/cache_bench.cc
+    memtable/memtablerep_bench.cc
+    db/range_del_aggregator_bench.cc
+    tools/db_bench.cc
+    table/table_reader_bench.cc
+    utilities/persistent_cache/hash_table_bench.cc)
+  add_library(testharness OBJECT test_util/testharness.cc)
+  foreach(sourcefile ${BENCHMARKS})
+    get_filename_component(exename ${sourcefile} NAME_WE)
+    add_executable(${exename}${ARTIFACT_SUFFIX} ${sourcefile}
+      $<TARGET_OBJECTS:testharness>)
+    target_link_libraries(${exename}${ARTIFACT_SUFFIX} gtest ${LIBS})
+  endforeach(sourcefile ${BENCHMARKS})
+
+  # For test util library that is build only in DEBUG mode
+  # and linked to tests. Add test only code that is not #ifdefed for Release here.
+  set(TESTUTIL_SOURCE
+      db/db_test_util.cc
+      monitoring/thread_status_updater_debug.cc
+      table/mock_table.cc
+      test_util/fault_injection_test_env.cc
+      utilities/cassandra/test_utils.cc
+  )
+  # test utilities are only build in debug
+  enable_testing()
+  add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})
+  set(TESTUTILLIB testutillib${ARTIFACT_SUFFIX})
+  add_library(${TESTUTILLIB} STATIC ${TESTUTIL_SOURCE})
+  if(MSVC)
+    set_target_properties(${TESTUTILLIB} PROPERTIES COMPILE_FLAGS "/Fd${CMAKE_CFG_INTDIR}/testutillib${ARTIFACT_SUFFIX}.pdb")
+  endif()
+  set_target_properties(${TESTUTILLIB}
+        PROPERTIES EXCLUDE_FROM_DEFAULT_BUILD_RELEASE 1
+        EXCLUDE_FROM_DEFAULT_BUILD_MINRELEASE 1
+        EXCLUDE_FROM_DEFAULT_BUILD_RELWITHDEBINFO 1
+        )
+
+  # Tests are excluded from Release builds
+  set(TEST_EXES ${TESTS})
+
+  foreach(sourcefile ${TEST_EXES})
+      get_filename_component(exename ${sourcefile} NAME_WE)
+      add_executable(${CMAKE_PROJECT_NAME}_${exename}${ARTIFACT_SUFFIX} ${sourcefile}
+        $<TARGET_OBJECTS:testharness>)
+      set_target_properties(${CMAKE_PROJECT_NAME}_${exename}${ARTIFACT_SUFFIX}
+        PROPERTIES EXCLUDE_FROM_DEFAULT_BUILD_RELEASE 1
+        EXCLUDE_FROM_DEFAULT_BUILD_MINRELEASE 1
+        EXCLUDE_FROM_DEFAULT_BUILD_RELWITHDEBINFO 1
+        OUTPUT_NAME ${exename}${ARTIFACT_SUFFIX}
+        )
+      target_link_libraries(${CMAKE_PROJECT_NAME}_${exename}${ARTIFACT_SUFFIX} testutillib${ARTIFACT_SUFFIX} gtest ${LIBS})
+      if(NOT "${exename}" MATCHES "db_sanity_test")
+        add_test(NAME ${exename} COMMAND ${exename}${ARTIFACT_SUFFIX})
+        add_dependencies(check ${CMAKE_PROJECT_NAME}_${exename}${ARTIFACT_SUFFIX})
+      endif()
+  endforeach(sourcefile ${TEST_EXES})
+
+  # C executables must link to a shared object
+  set(C_TESTS db/c_test.c)
+  set(C_TEST_EXES ${C_TESTS})
+
+  foreach(sourcefile ${C_TEST_EXES})
+      string(REPLACE ".c" "" exename ${sourcefile})
+      string(REGEX REPLACE "^((.+)/)+" "" exename ${exename})
+      add_executable(${exename}${ARTIFACT_SUFFIX} ${sourcefile})
+      set_target_properties(${exename}${ARTIFACT_SUFFIX}
+        PROPERTIES EXCLUDE_FROM_DEFAULT_BUILD_RELEASE 1
+        EXCLUDE_FROM_DEFAULT_BUILD_MINRELEASE 1
+        EXCLUDE_FROM_DEFAULT_BUILD_RELWITHDEBINFO 1
+        )
+      target_link_libraries(${exename}${ARTIFACT_SUFFIX} ${ROCKSDB_IMPORT_LIB} testutillib${ARTIFACT_SUFFIX})
+      add_test(NAME ${exename} COMMAND ${exename}${ARTIFACT_SUFFIX})
+      add_dependencies(check ${exename}${ARTIFACT_SUFFIX})
+  endforeach(sourcefile ${C_TEST_EXES})
+endif()
+
+option(WITH_TOOLS "build with tools" ON)
+if(WITH_TOOLS)
+  add_subdirectory(tools)
+endif()

@@ -380,6 +380,10 @@ namespace rocksdb {
             immutable_db_options_.use_direct_io_for_flush_and_compaction;
         s = env_->NewRandomAccessFile(IdentityFileName(dbname_), &idfile,
                                       customized_env);
+        // simply add path in the front of the file name will cause a exception here
+
+
+
         if (!s.ok()) {
           std::string error_str = s.ToString();
           // Check if unsupported Direct I/O is the root cause
