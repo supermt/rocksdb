@@ -84,18 +84,16 @@ namespace rocksdb {
     }
 
     inline uint32_t GetPathId(uint64_t packed_number_and_path_id) {
-        return (packed_number_and_path_id << (64 - kPosNum))
-                >> (64 - kPosNum);
+        return (packed_number_and_path_id >> kPosPath) & ((1 << 3) - 1);
     }
 
     inline int GetSource(uint64_t packed_number_and_path_id) {
-        return (packed_number_and_path_id << (64 - kPosPath))
-                >> (64 - kPosPath);
+        return (packed_number_and_path_id >> kPosSource) & ((1 << 3) - 1);
+                
     }
 
     inline int GetTarget(uint64_t packed_number_and_path_id) {
-        return (packed_number_and_path_id << (64 - kPosSource))
-                >> (64 - kPosSource);
+        return (packed_number_and_path_id) & ((1 << 3) - 1);
     }
 
 // Options while opening a file to read/write
